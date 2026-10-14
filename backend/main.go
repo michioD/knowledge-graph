@@ -37,6 +37,19 @@ func main() {
 		log.Fatal(err)
 	}
 
+	// Create snapshots table
+	createSnapshotsTableSQL := `
+	CREATE TABLE IF NOT EXISTS snapshots (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		nodes TEXT,
+		edges TEXT,
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+	);`
+	_, err = db.Exec(createSnapshotsTableSQL)
+	if err != nil {
+		log.Fatal(err)
+	}
+
 	// Insert default row if not exists
 	var count int
 	err = db.QueryRow("SELECT COUNT(*) FROM graph_state WHERE id = 1").Scan(&count)
@@ -66,6 +79,47 @@ func corsMiddleware(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+type NodeData struct {
+	Label   string `json:"label"`
+	Content string `json:"content"`
+	Type    string `json:"type"`
+}
+
+type Node struct {
+	ID   string   `json:"id"`
+	Data NodeData `json:"data"`
+}
+
+func countNodeDiff(currentNodesJSON, snapshotNodesJSON string) int {
+	var currentNodes []Node
+	var snapshotNodes []Node
+
+	json.Unmarshal([]byte(currentNodesJSON), &currentNodes)
+	json.Unmarshal([]byte(snapshotNodesJSON), &snapshotNodes)
+
+	snapshotMap := make(map[string]Node)
+	for _, n := range snapshotNodes {
+		snapshotMap[n.ID] = n
+	}
+
+	diffCount := 0
+	for _, curr := range currentNodes {
+		snap, exists := snapshotMap[curr.ID]
+		if !exists {
+			diffCount++ // Added
+		} else {
+			// Edited (comparing Label, Content, Type)
+			if curr.Data.Label != snap.Data.Label || curr.Data.Content != snap.Data.Content || curr.Data.Type != snap.Data.Type {
+				diffCount++
+			}
+			delete(snapshotMap, curr.ID)
+		}
+	}
+
+	diffCount += len(snapshotMap) // Deleted
+	return diffCount
 }
 
 func handleGraph(w http.ResponseWriter, r *http.Request) {
@@ -100,6 +154,34 @@ func handleGraph(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
+		}
+
+		// Snapshot logic
+		var lastSnapshotNodes string
+		var hoursSinceLastSnapshot float64
+		err = db.QueryRow("SELECT nodes, (julianday('now') - julianday(created_at)) * 24 FROM snapshots ORDER BY id DESC LIMIT 1").Scan(&lastSnapshotNodes, &hoursSinceLastSnapshot)
+		
+		needsSnapshot := false
+		if err == sql.ErrNoRows {
+			needsSnapshot = true // First snapshot ever
+		} else if err == nil {
+			if hoursSinceLastSnapshot >= 24 {
+				diff := countNodeDiff(string(state.Nodes), lastSnapshotNodes)
+				if diff >= 5 {
+					needsSnapshot = true
+				}
+			}
+		} else {
+			log.Printf("Error checking snapshot: %v", err)
+		}
+
+		if needsSnapshot {
+			_, err = db.Exec("INSERT INTO snapshots (nodes, edges) VALUES (?, ?)", string(state.Nodes), string(state.Edges))
+			if err != nil {
+				log.Printf("Failed to create snapshot: %v", err)
+			} else {
+				log.Printf("Snapshot created!")
+			}
 		}
 
 		w.WriteHeader(http.StatusOK)

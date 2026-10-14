@@ -1,6 +1,7 @@
 import { Handle, Position } from '@xyflow/react';
 import ReactMarkdown from 'react-markdown';
 import remarkMath from 'remark-math';
+import remarkGfm from 'remark-gfm';
 import rehypeKatex from 'rehype-katex';
 import 'katex/dist/katex.min.css';
 
@@ -54,7 +55,7 @@ const MathNode = ({ data }: { data: MathNodeData }) => {
         onClick={(e) => e.stopPropagation()}
       >
         <ReactMarkdown
-          remarkPlugins={[remarkMath]}
+          remarkPlugins={[remarkMath, remarkGfm]}
           rehypePlugins={[rehypeKatex]}
           components={{
             p: ({node, ...props}) => <p className="mb-2 last:mb-0" {...props} />,

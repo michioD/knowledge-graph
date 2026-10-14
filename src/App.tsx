@@ -8,15 +8,18 @@ import {
   useEdgesState,
   addEdge,
   MarkerType,
+  useReactFlow,
+  ReactFlowProvider,
+  SelectionMode,
 } from '@xyflow/react';
 import type { Connection, Edge, NodeTypes, Node } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 import MathNode from './MathNode';
 import type { MathNodeData } from './MathNode';
 import { v4 as uuidv4 } from 'uuid';
-import { Undo, Redo, Eraser, MousePointer2 } from 'lucide-react';
+import { Undo, Redo, Eraser, Hand, LassoSelect, Loader2 } from 'lucide-react';
+import FloatingEdge from './FloatingEdge';
 
-import { SmartBezierEdge, SmartEdgeProvider } from '@tisoap/react-flow-smart-edge';
 import dagre from 'dagre';
 
 const nodeTypes: NodeTypes = {
@@ -24,7 +27,7 @@ const nodeTypes: NodeTypes = {
 };
 
 const edgeTypes = {
-  smart: SmartBezierEdge,
+  floating: FloatingEdge,
 };
 
 const getLayoutedElements = (nodes: Node[], edges: Edge[], direction = 'TB') => {
@@ -64,7 +67,9 @@ type HistoryState = {
   edges: Edge[];
 };
 
-export default function App() {
+function AppContent() {
+  const { screenToFlowPosition } = useReactFlow();
+
   const [nodes, setNodes, onNodesChange] = useNodesState<Node>([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([]);
   const [isLoaded, setIsLoaded] = useState(false);
@@ -175,14 +180,14 @@ export default function App() {
   }, [past, future, setNodes, setEdges]);
 
   // UI Modes
-  const [isEraserMode, setIsEraserMode] = useState(false);
+  const [toolMode, setToolMode] = useState<'pan' | 'lasso' | 'eraser'>('pan');
   const [isMouseDown, setIsMouseDown] = useState(false);
 
   useEffect(() => {
     const down = (e: MouseEvent) => {
       if (e.button !== 0) return; // Only track left clicks
       setIsMouseDown(true);
-      if (isEraserMode) {
+      if (toolMode === 'eraser') {
         takeSnapshot();
       }
     };
@@ -193,7 +198,7 @@ export default function App() {
       window.removeEventListener('mousedown', down, { capture: true });
       window.removeEventListener('mouseup', up, { capture: true });
     };
-  }, [isEraserMode, takeSnapshot]);
+  }, [toolMode, takeSnapshot]);
 
   // Form State
   const [label, setLabel] = useState('');
@@ -218,7 +223,7 @@ export default function App() {
   );
 
   const onNodeClick = useCallback((_: React.MouseEvent, node: Node) => {
-    if (isEraserMode) {
+    if (toolMode === 'eraser') {
       setNodes((nds) => nds.filter((n) => n.id !== node.id));
       setEdges((eds) => eds.filter((e) => e.source !== node.id && e.target !== node.id));
       return;
@@ -229,26 +234,26 @@ export default function App() {
       }
       return n;
     }));
-  }, [isEraserMode, setNodes, setEdges]);
+  }, [toolMode, setNodes, setEdges]);
 
   const onEdgeClick = useCallback((_: React.MouseEvent, edge: Edge) => {
-    if (isEraserMode) {
+    if (toolMode === 'eraser') {
       setEdges((eds) => eds.filter((e) => e.id !== edge.id));
     }
-  }, [isEraserMode, setEdges]);
+  }, [toolMode, setEdges]);
 
   const onNodeMouseEnter = useCallback((_: React.MouseEvent, node: Node) => {
-    if (isEraserMode && isMouseDown) {
+    if (toolMode === 'eraser' && isMouseDown) {
       setNodes((nds) => nds.filter((n) => n.id !== node.id));
       setEdges((eds) => eds.filter((e) => e.source !== node.id && e.target !== node.id));
     }
-  }, [isEraserMode, isMouseDown, setNodes, setEdges]);
+  }, [toolMode, isMouseDown, setNodes, setEdges]);
 
   const onEdgeMouseEnter = useCallback((_: React.MouseEvent, edge: Edge) => {
-    if (isEraserMode && isMouseDown) {
+    if (toolMode === 'eraser' && isMouseDown) {
       setEdges((eds) => eds.filter((e) => e.id !== edge.id));
     }
-  }, [isEraserMode, isMouseDown, setEdges]);
+  }, [toolMode, isMouseDown, setEdges]);
 
   const saveNode = (e: React.FormEvent) => {
     e.preventDefault();
@@ -273,10 +278,18 @@ export default function App() {
       }));
       setEditingNodeId(null);
     } else {
+      // Add node to the center of the screen
+      // Taking into account the sidebar width (320px) by calculating the center of the React Flow canvas
+      const sidebarWidth = 320;
+      const canvasWidth = window.innerWidth - sidebarWidth;
+      const x = sidebarWidth + canvasWidth / 2;
+      const y = window.innerHeight / 2;
+      const centerPosition = screenToFlowPosition({ x, y });
+      
       const newNode = {
         id: uuidv4(),
         type: 'math',
-        position: { x: Math.random() * 200 + 100, y: Math.random() * 200 + 100 },
+        position: centerPosition,
         data: {
           label,
           content,
@@ -308,7 +321,7 @@ export default function App() {
         const originalPosition = n.data.originalPosition as { x: number, y: number } | undefined;
         const position = originalPosition || n.position;
         const data = { ...n.data, expanded: false };
-        delete data.originalPosition;
+        delete (data as any).originalPosition;
         return { ...n, position, data };
       }));
     }
@@ -343,7 +356,10 @@ export default function App() {
           <div className="flex justify-between items-center mb-6">
             <div className="flex items-center gap-2">
               <h1 className="text-xl font-bold text-gray-800">Knowledge Graph</h1>
-              <span className="text-xs text-gray-400 font-medium">{saveStatus}</span>
+              <span className="text-xs text-gray-400 font-medium flex items-center gap-1">
+                {saveStatus === 'Saving...' && <Loader2 className="animate-spin w-3 h-3" />}
+                {saveStatus}
+              </span>
             </div>
             <div className="flex gap-1">
               <button 
@@ -367,14 +383,23 @@ export default function App() {
 
           <div className="flex bg-gray-100 p-1 rounded-md mb-6 gap-1">
             <button
-              className={`flex-1 flex items-center justify-center gap-2 py-1.5 px-2 rounded-sm text-sm font-medium transition-colors ${!isEraserMode ? 'bg-white shadow-sm text-blue-600' : 'text-gray-600 hover:bg-gray-200'}`}
-              onClick={() => setIsEraserMode(false)}
+              className={`flex-1 flex items-center justify-center gap-2 py-1.5 px-2 rounded-sm text-sm font-medium transition-colors ${toolMode === 'pan' ? 'bg-white shadow-sm text-blue-600' : 'text-gray-600 hover:bg-gray-200'}`}
+              onClick={() => setToolMode('pan')}
+              title="Pan (Drag to move canvas)"
             >
-              <MousePointer2 size={16} /> Select
+              <Hand size={16} /> Pan
             </button>
             <button
-              className={`flex-1 flex items-center justify-center gap-2 py-1.5 px-2 rounded-sm text-sm font-medium transition-colors ${isEraserMode ? 'bg-white shadow-sm text-red-600' : 'text-gray-600 hover:bg-gray-200'}`}
-              onClick={() => setIsEraserMode(true)}
+              className={`flex-1 flex items-center justify-center gap-2 py-1.5 px-2 rounded-sm text-sm font-medium transition-colors ${toolMode === 'lasso' ? 'bg-white shadow-sm text-blue-600' : 'text-gray-600 hover:bg-gray-200'}`}
+              onClick={() => setToolMode('lasso')}
+              title="Lasso (Drag to select nodes)"
+            >
+              <LassoSelect size={16} /> Lasso
+            </button>
+            <button
+              className={`flex-1 flex items-center justify-center gap-2 py-1.5 px-2 rounded-sm text-sm font-medium transition-colors ${toolMode === 'eraser' ? 'bg-white shadow-sm text-red-600' : 'text-gray-600 hover:bg-gray-200'}`}
+              onClick={() => setToolMode('eraser')}
+              title="Erase (Click or drag to delete)"
             >
               <Eraser size={16} /> Erase
             </button>
@@ -470,7 +495,7 @@ export default function App() {
         <div className="flex-1 overflow-y-auto p-4 text-sm text-gray-500">
           <p className="font-semibold text-gray-700">How to use:</p>
           <ul className="list-disc pl-5 mt-2 space-y-1">
-            <li><strong>Select Tool:</strong> Drag canvas to pan. Click nodes to expand.</li>
+            <li><strong>Pan Tool:</strong> Drag canvas to move around.</li>\n            <li><strong>Lasso Tool:</strong> Drag canvas to lasso select multiple nodes.</li>
             <li><strong>Eraser Tool:</strong> Click and drag over nodes/edges to erase them instantly!</li>
             <li>Right-click a node to edit its content</li>
             <li>Use <code>$$...$$</code> for block equations</li>
@@ -482,7 +507,7 @@ export default function App() {
       {/* Graph Area */}
       <div 
         className="flex-1 relative" 
-        style={{ cursor: isEraserMode ? 'crosshair' : 'default' }}
+        style={{ cursor: toolMode === 'eraser' ? 'crosshair' : (toolMode === 'pan' ? 'grab' : 'default') }}
       >
         {/* Legend */}
         <div className="absolute top-4 right-4 bg-white/90 p-2 rounded shadow-sm border border-gray-200 z-10 text-xs pointer-events-none">
@@ -503,46 +528,56 @@ export default function App() {
           </div>
         </div>
 
-        <SmartEdgeProvider nodes={nodes} options={{ nodePadding: 50, gridRatio: 20 }}>
-          <ReactFlow
-            nodes={nodes}
-            edges={edges}
-            onNodesChange={onNodesChange}
-            onEdgesChange={onEdgesChange}
-            onConnect={onConnect}
-            onNodeClick={onNodeClick}
-            onEdgeClick={onEdgeClick}
-            onNodeMouseEnter={onNodeMouseEnter}
-            onEdgeMouseEnter={onEdgeMouseEnter}
-            onNodeContextMenu={onNodeContextMenu}
-            onNodesDelete={() => takeSnapshot()}
-            onEdgesDelete={() => takeSnapshot()}
-            onNodeDragStart={() => takeSnapshot()}
-            nodeTypes={nodeTypes}
-            edgeTypes={edgeTypes}
-            panOnDrag={!isEraserMode}
-            selectionOnDrag={!isEraserMode}
-            nodesDraggable={!isEraserMode}
-            elementsSelectable={!isEraserMode}
-            fitView
-            defaultEdgeOptions={{ 
-              type: 'smart', 
-              animated: false,
-              style: { strokeWidth: 3, stroke: '#000000' },
-              markerEnd: {
-                type: MarkerType.ArrowClosed,
-                width: 20,
-                height: 20,
-                color: '#000000',
-              }
-            }}
-          >
-            <Controls />
-            <MiniMap />
-            <Background gap={12} size={1} />
-          </ReactFlow>
-        </SmartEdgeProvider>
+        <ReactFlow
+          nodes={nodes}
+          edges={edges}
+          onNodesChange={onNodesChange}
+          onEdgesChange={onEdgesChange}
+          onConnect={onConnect}
+          onNodeClick={onNodeClick}
+          onEdgeClick={onEdgeClick}
+          onNodeMouseEnter={onNodeMouseEnter}
+          onEdgeMouseEnter={onEdgeMouseEnter}
+          onNodeContextMenu={onNodeContextMenu}
+          onNodesDelete={() => takeSnapshot()}
+          onEdgesDelete={() => takeSnapshot()}
+          onNodeDragStart={() => takeSnapshot()}
+          nodeTypes={nodeTypes}
+          edgeTypes={edgeTypes}
+          panOnDrag={toolMode === 'pan'}
+          selectionOnDrag={toolMode === 'lasso'}
+          nodesDraggable={toolMode !== 'eraser'}
+          elementsSelectable={toolMode !== 'eraser'}
+          selectionMode={SelectionMode.Partial}
+          connectionMode={"loose" as any}
+          fitView
+          minZoom={0.01}
+          defaultEdgeOptions={{ 
+            type: 'floating', 
+            animated: false,
+            style: { strokeWidth: 3, stroke: '#000000' },
+            markerEnd: {
+              type: MarkerType.ArrowClosed,
+              width: 20,
+              height: 20,
+              color: '#000000',
+            }
+          }}
+        >
+          <Controls />
+          <MiniMap />
+          <Background gap={12} size={1} />
+        </ReactFlow>
       </div>
     </div>
+  );
+}
+
+
+export default function App() {
+  return (
+    <ReactFlowProvider>
+      <AppContent />
+    </ReactFlowProvider>
   );
 }
